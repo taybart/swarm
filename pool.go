@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"context"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -34,7 +35,7 @@ func NewWorkerPool() *WorkerPool {
 }
 
 // Swarm: start work
-func (wp *WorkerPool) Swarm(workers int, jobs []Job) {
+func (wp *WorkerPool) Swarm(ctx context.Context, workers int, jobs []Job) {
 	// check for SIGINT/TERM
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -51,6 +52,8 @@ func (wp *WorkerPool) Swarm(workers int, jobs []Job) {
 		for {
 			select {
 			case <-sigs:
+				return
+			case <-ctx.Done():
 				return
 			default:
 				jobID := jobIDs[rand.Intn(len(jobIDs))]
@@ -87,6 +90,16 @@ func (wp *WorkerPool) calculateWeights(jobs []Job) []int {
 		}
 	}
 	return weights
+}
+
+// Swarm: start work
+func (wp *WorkerPool) Wait() {
+	// wq.
+}
+
+// Swarm: start work
+func (wp *WorkerPool) Cancel() {
+	// wq.
 }
 
 func (wp *WorkerPool) ListenForWork(wg *sync.WaitGroup) {

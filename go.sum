@@ -1,2 +1,4 @@
 github.com/taybart/log v1.6.2 h1:loVHUm+sG4Xfz2LtXggSL5o8o58GwXWW4QWeYCyJpaY=
 github.com/taybart/log v1.6.2/go.mod h1:zG3tAVOXRh0zQfyxs0dTqarj1hTKFOUWk/oKeiugmZA=
+github.com/taybart/rest v0.2.2 h1:L4en1UTifhi5tLlCxydXhlQr/E1/uZ4FO9pcr/FYI4k=
+github.com/taybart/rest v0.2.2/go.mod h1:rmFNMv33mD6kP9ZE5Aob1m+RIXSPDuS9a+EnfPMDPEQ=
