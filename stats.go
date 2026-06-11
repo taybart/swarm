@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/taybart/log"
@@ -41,13 +42,14 @@ func (s Stat) String() string {
 		s.Count, log.Reset, s.AverageTime)
 }
 func (s *Stat) CalcTimes() {
-	avg := int64(0)
-	for _, t := range s.RequestTimes {
-		avg += int64(t.Latency)
+	if len(s.RequestTimes) == 0 {
+		return
 	}
-	avg /= int64(len(s.RequestTimes))
-
-	s.AverageTime = time.Duration(avg) * time.Nanosecond
+	var sum time.Duration
+	for _, t := range s.RequestTimes {
+		sum += t.Latency
+	}
+	s.AverageTime = sum / time.Duration(len(s.RequestTimes))
 }
 
 func (wp *WorkerPool) recordResult(start time.Time, req Request, res *http.Response) {
@@ -66,5 +68,12 @@ func (wp *WorkerPool) recordResult(start time.Time, req Request, res *http.Respo
 		result.Error = ErrBadStatus
 	}
 
+	// lock-free counters for the live reporter
+	atomic.AddInt64(&wp.count, 1)
+	atomic.AddInt64(&wp.latency, int64(result.Time.Latency))
+
+	// recordResult is called concurrently from every worker goroutine
+	wp.mu.Lock()
 	wp.Results = append(wp.Results, result)
+	wp.mu.Unlock()
 }

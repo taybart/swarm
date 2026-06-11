@@ -2,32 +2,39 @@ package swarm_test
 
 import (
 	"context"
-	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/taybart/log"
-	"github.com/taybart/rest/server"
 	"github.com/taybart/swarm"
 )
 
 func TestWork(t *testing.T) {
 	log.SetLevel(log.TEST)
 	log.Test("starting test")
-	url := "http://127.0.0.1:8080"
 
-	serv := server.New(server.Config{Addr: url})
-	go serv.ListenAndServe()
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+	defer srv.Close()
+	url := srv.URL
 
-	ctx := context.Background()
+	// run for a few seconds so the live reporter ticks, dumping rps and
+	// latency every second
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	wp := swarm.NewWorkerPool()
-	go wp.Swarm(ctx, 4, []swarm.Job{
+	wp.Interval = time.Second
+
+	err := wp.Swarm(ctx, 4, []swarm.Job{
 		{
 			Fn: func() error {
-				req, err := http.NewRequest("GET",
-					fmt.Sprintf("%s/get", url), nil)
+				req, err := http.NewRequest("GET", url+"/get", nil)
 				if err != nil {
 					return err
 				}
@@ -36,8 +43,7 @@ func TestWork(t *testing.T) {
 		},
 		{
 			Fn: func() error {
-				req, err := http.NewRequest("POST",
-					fmt.Sprintf("%s/post", url),
+				req, err := http.NewRequest("POST", url+"/post",
 					strings.NewReader(`{"hello":"world"}`))
 				if err != nil {
 					return err
@@ -46,8 +52,7 @@ func TestWork(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				req, err = http.NewRequest("PUT",
-					fmt.Sprintf("%s/put", url), nil)
+				req, err = http.NewRequest("PUT", url+"/put", nil)
 				if err != nil {
 					return err
 				}
@@ -55,6 +60,16 @@ func TestWork(t *testing.T) {
 			},
 		},
 	})
-	log.Test("Canceling context")
-	ctx.Done()
+	if err != nil {
+		t.Fatalf("swarm returned error: %v", err)
+	}
+
+	if len(wp.Results) == 0 {
+		t.Fatal("expected requests to have been recorded, got none")
+	}
+	if wp.Report.TotalRequests != len(wp.Results) {
+		t.Fatalf("report total %d != results %d",
+			wp.Report.TotalRequests, len(wp.Results))
+	}
+	log.Test("recorded", len(wp.Results), "requests")
 }

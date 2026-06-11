@@ -15,7 +15,7 @@ type Report struct {
 	TotalRequests int
 }
 
-func (r *Report) Generate(results []Result) {
+func (r *Report) Generate(results []Result) error {
 	r.TotalRequests = len(results)
 	r.Stats = make(map[string]Stat)
 	for _, res := range results {
@@ -35,22 +35,29 @@ func (r *Report) Generate(results []Result) {
 		stat.CalcTimes()
 		r.Stats[k] = stat
 	}
-	t := float64(r.TotalRequests) / float64(time.Since(r.StartTime).Milliseconds())
+	elapsed := time.Since(r.StartTime)
+	rps := 0.0
+	if elapsed > 0 {
+		rps = float64(r.TotalRequests) / elapsed.Seconds()
+	}
 	log.SetPlain()
-	log.Infof("Total requests %d in %s req/s %.1f\n", r.TotalRequests, time.Since(r.StartTime), t*1000)
-	log.Info("requests")
+	log.Infof("\nTotal requests %s%d%s in %s%s%s req/s %s%.1f%s\n",
+		log.Green, r.TotalRequests, log.Reset,
+		log.Blue, elapsed, log.Reset,
+		log.Yellow, rps, log.Reset)
+	log.Info("request stats:")
 	for _, s := range r.Stats {
 		log.Info(s)
 	}
 	log.SetFancy()
-	r.toCSV()
+	return r.toCSV()
 }
 
 // TODO: stream so there are no mem issues
-func (r *Report) toCSV() {
+func (r *Report) toCSV() error {
 	file, err := os.Create("result.csv")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer file.Close()
 	w := csv.NewWriter(file)
@@ -79,14 +86,12 @@ func (r *Report) toCSV() {
 
 	for _, row := range body {
 		if err := w.Write(row); err != nil {
-			log.Fatalln("error writing record to csv:", err)
+			return fmt.Errorf("error writing record to csv: %w", err)
 		}
 	}
 
-	// Write any buffered data to the underlying writer (standard output).
+	// Write any buffered data to the underlying writer.
 	w.Flush()
 
-	if err := w.Error(); err != nil {
-		log.Fatal(err)
-	}
+	return w.Error()
 }
