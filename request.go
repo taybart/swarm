@@ -12,9 +12,18 @@ type Request struct {
 	Expect int
 }
 
+// client returns the pool's tuned client, falling back to the default for a
+// zero-value WorkerPool built without NewWorkerPool.
+func (wp *WorkerPool) client() *http.Client {
+	if wp.Client != nil {
+		return wp.Client
+	}
+	return http.DefaultClient
+}
+
 func (wp *WorkerPool) Request(req Request) error {
 	start := time.Now()
-	res, err := http.DefaultClient.Do(req.Req)
+	res, err := wp.client().Do(req.Req)
 	if err != nil {
 		return err
 	}
@@ -24,7 +33,7 @@ func (wp *WorkerPool) Request(req Request) error {
 
 func (wp *WorkerPool) RequestWithResponse(req Request, response interface{}) error {
 	start := time.Now()
-	res, err := http.DefaultClient.Do(req.Req)
+	res, err := wp.client().Do(req.Req)
 	if err != nil {
 		return err
 	}

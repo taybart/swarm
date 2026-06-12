@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -32,19 +33,83 @@ type WorkerPool struct {
 	Results  []Result
 	Timeout  time.Duration
 	Interval time.Duration // live progress interval; 0 disables
+	RampUp   time.Duration // stagger worker/VU startup over this window; 0 = all at once
+	WarmUp   time.Duration // discard results recorded in this window after start; 0 = keep all
 	Report   Report
-	jobsch   chan Job
-	cancel   context.CancelFunc
-	mu       sync.RWMutex
+
+	// Client is used by Request/RequestWithResponse. NewWorkerPool installs one
+	// with a tuned transport; replace it to customize (proxy, TLS, etc.).
+	Client    *http.Client
+	transport *http.Transport // owned default transport; per-host cap tuned to concurrency
+
+	jobsch chan Job
+	cancel context.CancelFunc
+	mu     sync.RWMutex
 }
 
 func NewWorkerPool() *WorkerPool {
+	// One shared keep-alive pool. The default MaxIdleConnsPerHost is 2, which
+	// serializes a swarm onto two connections and measures the client instead
+	// of the target; begin() raises the per-host cap to the concurrency level.
+	tr := &http.Transport{
+		MaxIdleConns:        256,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	wp := WorkerPool{
-		Results:  []Result{},
-		jobsch:   make(chan Job),
-		Interval: time.Second, // live rps/latency cadence; set 0 to disable
+		Results:   []Result{},
+		jobsch:    make(chan Job),
+		Interval:  time.Second, // live rps/latency cadence; set 0 to disable
+		transport: tr,
+		Client:    &http.Client{Transport: tr},
 	}
 	return &wp
+}
+
+// begin derives the run context (timeout + signal cancellation), tunes the
+// connection pool to the concurrency level, and starts the live reporter.
+// Shared by Swarm (jobs) and Run (scenarios).
+func (wp *WorkerPool) begin(ctx context.Context, concurrency int) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if wp.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, wp.Timeout)
+	}
+	wp.cancel = cancel
+
+	// SIGINT/TERM funnels through the same cancel as timeout and Cancel().
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigs:
+			cancel()
+		case <-ctx.Done():
+		}
+		signal.Stop(sigs)
+	}()
+
+	if wp.transport != nil && wp.transport.MaxIdleConnsPerHost < concurrency {
+		wp.transport.MaxIdleConnsPerHost = concurrency
+	}
+
+	wp.Report.StartTime = time.Now()
+	wp.Report.WarmUp = wp.WarmUp
+	if wp.Interval > 0 {
+		go wp.reportProgress(ctx)
+	}
+	return ctx, cancel
+}
+
+// stagger sleeps for one ramp-up slice between startups, returning early if the
+// run is cancelled mid-ramp (remaining workers then spawn immediately and exit).
+func (wp *WorkerPool) stagger(ctx context.Context, total int) {
+	if wp.RampUp <= 0 || total <= 1 {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(wp.RampUp / time.Duration(total)):
+	}
 }
 
 // Swarm start work
@@ -53,27 +118,12 @@ func (wp *WorkerPool) Swarm(ctx context.Context, workers int, jobs []Job) error 
 		return ErrNoJobs
 	}
 
-	// derive a cancellable context so Cancel(), the timeout, and signals
-	// all funnel through one shutdown path
-	ctx, cancel := context.WithCancel(ctx)
-	if wp.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, wp.Timeout)
-	}
-	wp.cancel = cancel
+	ctx, cancel := wp.begin(ctx, workers)
 	defer cancel()
-
-	// check for SIGINT/TERM
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigs)
 
 	jobIDs := wp.calculateWeights(jobs)
 
-	wp.Report.StartTime = time.Now()
 	log.Info("Creating work queue")
-	if wp.Interval > 0 {
-		go wp.reportProgress(ctx)
-	}
 	go func() {
 		defer func() {
 			close(wp.jobsch)
@@ -84,23 +134,22 @@ func (wp *WorkerPool) Swarm(ctx context.Context, workers int, jobs []Job) error 
 			// keep the send inside the select so we can be cancelled
 			// even while every worker is busy
 			select {
-			case <-sigs:
-				return
 			case <-ctx.Done():
 				return
 			case wp.jobsch <- jobs[jobID]:
 			}
 		}
 	}()
-	return wp.doWork(workers)
+	return wp.doWork(ctx, workers)
 }
 
 // doWork spin up workers
-func (wp *WorkerPool) doWork(workers int) error {
+func (wp *WorkerPool) doWork(ctx context.Context, workers int) error {
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go wp.listenForWork(&wg)
+		wp.stagger(ctx, workers)
 	}
 	log.Info(workers, "workers listening for jobs...")
 	wg.Wait()

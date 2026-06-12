@@ -11,11 +11,28 @@ import (
 
 type Report struct {
 	StartTime     time.Time
+	WarmUp        time.Duration // results before StartTime+WarmUp are excluded
 	Stats         map[string]Stat
 	TotalRequests int
 }
 
 func (r *Report) Generate(results []Result) error {
+	// Drop warm-up results so cold caches / connection establishment / JIT
+	// don't skew steady-state latency and throughput.
+	measureStart := r.StartTime
+	if r.WarmUp > 0 {
+		measureStart = r.StartTime.Add(r.WarmUp)
+		kept := results[:0:0]
+		for _, res := range results {
+			if res.Time.Timestamp.Before(measureStart) {
+				continue
+			}
+			kept = append(kept, res)
+		}
+		log.Infof("warm-up: discarded %d of %d requests\n", len(results)-len(kept), len(results))
+		results = kept
+	}
+
 	r.TotalRequests = len(results)
 	r.Stats = make(map[string]Stat)
 	for _, res := range results {
@@ -35,7 +52,7 @@ func (r *Report) Generate(results []Result) error {
 		stat.CalcTimes()
 		r.Stats[k] = stat
 	}
-	elapsed := time.Since(r.StartTime)
+	elapsed := time.Since(measureStart)
 	rps := 0.0
 	if elapsed > 0 {
 		rps = float64(r.TotalRequests) / elapsed.Seconds()
